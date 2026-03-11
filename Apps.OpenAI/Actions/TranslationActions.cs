@@ -10,6 +10,7 @@ using Blackbird.Applications.Sdk.Common.Invocation;
 using Blackbird.Applications.SDK.Extensions.FileManagement.Interfaces;
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using Apps.OpenAI.Dtos;
@@ -28,6 +29,7 @@ using Apps.OpenAI.Models.Responses.Chat;
 using Apps.OpenAI.Utils;
 using Blackbird.Applications.Sdk.Glossaries.Utils.Dtos;
 using Blackbird.Filters.Xliff.Xliff1;
+using TiktokenSharp;
 
 namespace Apps.OpenAI.Actions;
 
@@ -35,6 +37,9 @@ namespace Apps.OpenAI.Actions;
 public class TranslationActions(InvocationContext invocationContext, IFileManagementClient fileManagementClient) 
     : BaseActions(invocationContext, fileManagementClient)
 {
+    private const string TokenEncoding = "cl100k_base";
+    private const int DefaultTokenBudgetPerBucket = 4000;
+
     [BlueprintActionDefinition(BlueprintAction.TranslateFile)]
     [Action("Translate", Description = "Translates file content from a CMS or file storage and outputs localized content for compatible actions.")]
     public async Task<ContentProcessingResult> TranslateContent([ActionParameter] TextChatModelIdentifier modelIdentifier,
@@ -42,31 +47,51 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         [ActionParameter, Display("Additional instructions", Description = "Specify additional instructions to be applied to the translation. For example, 'Cater to an older audience.'")] string? prompt,
         [ActionParameter] GlossaryRequest glossary,
         [ActionParameter] ReasoningEffortRequest reasoningEffortRequest,
-        [ActionParameter, Display("Bucket size", Description = "Specify the number of source texts to be translated at once. Default value: 1500. (See our documentation for an explanation)")] int? bucketSize = null)
+        [ActionParameter, Display("Bucket size", Description = "Specify the approximate max number of source tokens per translation bucket. Default value: 4000. (See our documentation for an explanation)")] int? bucketSize = null,
+        [ActionParameter, Display("Parallel requests", Description = "Maximum number of translation buckets processed in parallel. Default value: 3.")] int? parallelRequests = null)
     {
+        // Step 1: Resolve runtime options and validate parallelism constraints.
         var neverFail = false;
-        var batchSize = bucketSize ?? 1500;
+        var tokenBudgetPerBucket = bucketSize ?? DefaultTokenBudgetPerBucket;
+        var maxParallelBatches = parallelRequests ?? 3;
+        if (maxParallelBatches < 1 || maxParallelBatches > 10)
+        {
+            throw new PluginMisconfigurationException("Parallel requests must be between 1 and 10.");
+        }
+        if (tokenBudgetPerBucket < 1)
+        {
+            throw new PluginMisconfigurationException("Bucket size must be greater than 0.");
+        }
+
+        // Step 2: Download and parse the input file into transformation content.
         var result = new ContentProcessingResult();
         var stream = await fileManagementClient.DownloadAsync(input.File);
         var content = await ErrorHandler.ExecuteWithErrorHandlingAsync(() =>
             Transformation.Parse(stream, input.File.Name)
         );
+
+        // Step 3: Merge language metadata from UI input only when file metadata is missing.
         content.SourceLanguage ??= input.SourceLanguage;
         content.TargetLanguage ??= input.TargetLanguage;        
+
+        // Step 4: Ensure target language exists; source language can still be auto-detected.
         if (content.TargetLanguage == null) throw new PluginMisconfigurationException("The target language is not defined yet. Please assign the target language in this action.");
 
+        // Step 5: Auto-detect source language when it is absent in both file and UI input.
         if (content.SourceLanguage == null)
         {
             content.SourceLanguage = await IdentifySourceLanguage(modelIdentifier, content.Source().GetPlaintext());
         }
 
+        // Step 6: Prepare translation services and shared state for aggregated results.
         var batchProcessingService = new BatchProcessingService(UniversalClient, FileManagementClient);
 
         var systemprompt = string.Empty;
         var errors = new List<string>();
         var usages = new List<UsageDto>();
-        int batchCounter = 0;
+        var aggregationLock = new object();
 
+        // Step 7: Configure batch translation options passed to the processing service.
         var batchOptions = new BatchProcessingOptions(
             UniversalClient.GetModel(modelIdentifier.ModelId),
             content.SourceLanguage,
@@ -81,27 +106,29 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             reasoningEffortRequest.ReasoningEffort,
             content.Notes);
 
-        async Task<IEnumerable<TranslationEntity>> BatchTranslate(IEnumerable<(Unit Unit, Segment Segment)> batch)
+        // Step 8: Define per-batch execution logic, including deduplication and fallback mapping.
+        async Task<List<TranslationEntity>> BatchTranslate(List<(Unit Unit, Segment Segment)> batch, int batchNumber)
         {
-            var batchList = batch.ToList();
+            var batchList = batch;
             var idSegments = batchList.Select((x, i) => new { Id = i + 1, Value = x }).ToDictionary(x => x.Id.ToString(), x => x.Value.Segment);
-            batchCounter++;
             
             var translationLookup = new Dictionary<string, TranslationEntity>();
             try
             {
                 var batchResult = await batchProcessingService.ProcessBatchAsync(idSegments, batchOptions, false);
 
-                systemprompt = batchResult.SystemPrompt;
-
                 var duplicates = batchResult.UpdatedTranslations.GroupBy(x => x.TranslationId)
                     .Where(g => g.Count() > 1)
                     .Select(g => new { TranslationId = g.Key, Count = g.Count() })
                     .ToList();
 
-                errors.AddRange(duplicates.Select(duplicate => $"Duplicate translation ID found: {duplicate.TranslationId} appears {duplicate.Count} times"));
-                errors.AddRange(batchResult.ErrorMessages);
-                usages.Add(batchResult.Usage);
+                lock (aggregationLock)
+                {
+                    systemprompt = batchResult.SystemPrompt;
+                    errors.AddRange(duplicates.Select(duplicate => $"Duplicate translation ID found: {duplicate.TranslationId} appears {duplicate.Count} times"));
+                    errors.AddRange(batchResult.ErrorMessages);
+                    usages.Add(batchResult.Usage);
+                }
 
                 if (batchResult.IsSuccess)
                 {
@@ -114,12 +141,15 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
                 if (!batchResult.IsSuccess && !neverFail)
                 {
                     throw new PluginApplicationException(
-                        $"Failed to process batch {batchCounter} (size: {batchSize}). Errors: {string.Join(", ", batchResult.ErrorMessages)}");
+                        $"Failed to process batch {batchNumber} (token budget: {tokenBudgetPerBucket}). Errors: {string.Join(", ", batchResult.ErrorMessages)}");
                 }
             }
             catch (Exception ex) when (neverFail)
             {
-                errors.Add($"Error in batch {batchCounter} (size: {batchSize}): {ex.Message}");
+                lock (aggregationLock)
+                {
+                    errors.Add($"Error in batch {batchNumber} (token budget: {tokenBudgetPerBucket}): {ex.Message}");
+                }
             }
             
             // Ensure exactly one result per (Unit, Segment) in the batch
@@ -145,17 +175,61 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             return allResults;
         }
 
+        // Step 9: Extract initial segments eligible for translation and compute counters.
         var units = content.GetUnits();        
         result.TotalSegmentsCount = units.SelectMany(x => x.Segments).Count();
         units = units.Where(x => x.IsInitial);
         var segments = units.Where(x => x.IsInitial).SelectMany(x => x.Segments);
         result.TotalTranslatable = segments.Count();
 
-        var processedBatches = await units.Where(x => x.IsInitial).Batch(batchSize).Process(BatchTranslate);
-        result.ProcessedBatchesCount = batchCounter;
+        // Step 10: Flatten unit-segment pairs so updates can be re-applied to original units.
+        var segmentsToTranslate = units
+            .Where(x => x.IsInitial)
+            .SelectMany(unit => unit.Segments.Select(segment => (Unit: unit, Segment: segment)))
+            .ToList();
+
+        // Step 11: Build translation buckets using token budget instead of segment count.
+        var translationBatches = await BuildTokenBucketsAsync(
+            segmentsToTranslate,
+            x => x.Segment.GetSource(),
+            tokenBudgetPerBucket);
+
+        // Step 12: Limit concurrent batch execution with a semaphore.
+        using var semaphore = new SemaphoreSlim(maxParallelBatches, maxParallelBatches);
+
+        var batchTasks = translationBatches
+            .Select((batch, index) => ProcessBatch(batch, index + 1))
+            .ToList();
+
+        // Step 13: Execute all batches, then regroup translated segments by their parent unit.
+        var processedSegments = (await Task.WhenAll(batchTasks)).SelectMany(x => x).ToList();
+        var processedBatches = processedSegments
+            .GroupBy(x => x.Unit)
+            .Select(group => (group.Key, group.Select(x => (x.Segment, x.Translation)).ToList()))
+            .ToList();
+
+        result.ProcessedBatchesCount = translationBatches.Count;
         result.Usage = UsageDto.Sum(usages);
         result.SystemPrompt = systemprompt;
 
+        // Step 14: Wrap per-batch execution with semaphore acquire/release.
+        async Task<List<(Unit Unit, Segment Segment, TranslationEntity Translation)>> ProcessBatch(
+            List<(Unit Unit, Segment Segment)> batch,
+            int batchNumber)
+        {
+            await semaphore.WaitAsync();
+            try
+            {
+                var translations = await BatchTranslate(batch, batchNumber);
+                return batch.Select((item, i) => (item.Unit, item.Segment, translations[i])).ToList();
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }
+
+        // Step 15: Apply translated text back to segments and collect usage provenance.
         var updatedCount = 0;
         foreach (var (unit, results) in processedBatches)
         {
@@ -183,6 +257,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
 
         result.TargetsUpdatedCount = updatedCount;
 
+        // Step 16: Serialize and upload output in the requested format.
         if (input.OutputFileHandling == "original")
         {
             var targetContent = content.Target();
@@ -198,6 +273,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             result.File = await fileManagementClient.UploadAsync(content.Serialize().ToStream(), MediaTypes.Xliff, content.XliffFileName);
         }
 
+        // Step 17: Return aggregated processing metadata and output file reference.
         return result;
     }    
 
@@ -246,28 +322,29 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             systemPromptBase += " Use the provided glossary to ensure accurate translations of specific terms.";
         }
         
-        var bucketSize = startBackgroundProcessRequest.GetBucketingSize();
-        var segmentList = segments.ToList();
-        
-        // Create buckets by splitting segments into chunks
-        var segmentBuckets = new List<List<Segment>>();
-        for (int i = 0; i < segmentList.Count; i += bucketSize)
-        {
-            var bucket = segmentList.Skip(i).Take(bucketSize).ToList();
-            segmentBuckets.Add(bucket);
-        }
+        var tokenBudgetPerBucket = startBackgroundProcessRequest.BucketSize ?? DefaultTokenBudgetPerBucket;
+        if (tokenBudgetPerBucket < 1)
+            throw new PluginMisconfigurationException("Bucket size must be greater than 0.");
+
+        var indexedSegments = segments
+            .Select((segment, index) => (Segment: segment, Index: index))
+            .ToList();
+
+        var segmentBuckets = await BuildTokenBucketsAsync(
+            indexedSegments,
+            x => x.Segment.GetSource(),
+            tokenBudgetPerBucket);
         
         foreach (var (bucket, bucketIndex) in segmentBuckets.Select((bucket, index) => (bucket, index)))
         {
             var segmentTexts = new List<string>();
             var segmentIds = new List<string>();
             
-            foreach (var (segment, segmentIndex) in bucket.Select((seg, idx) => (seg, idx)))
+            foreach (var item in bucket)
             {
-                var globalIndex = bucketIndex * bucketSize + segmentIndex;
-                var sourceText = segment.GetSource();
+                var sourceText = item.Segment.GetSource();
                 segmentTexts.Add(sourceText);
-                segmentIds.Add(globalIndex.ToString());
+                segmentIds.Add(item.Index.ToString());
             }
             
             var userPrompt = "Translate the following texts:\n\n";
@@ -324,6 +401,40 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             ExpectedCompletionTime = batchResponse.ExpectedCompletionTime,
             TransformationFile = await fileManagementClient.UploadAsync(content.Serialize().ToStream(), MediaTypes.Xliff, content.XliffFileName)
         };
+    }
+
+    private static async Task<List<List<T>>> BuildTokenBucketsAsync<T>(
+        IReadOnlyList<T> items,
+        Func<T, string> getText,
+        int tokenBudget)
+    {
+        var encoding = await TikToken.GetEncodingAsync(TokenEncoding);
+        var buckets = new List<List<T>>();
+        var currentBucket = new List<T>();
+        var currentTokenCount = 0;
+
+        foreach (var item in items)
+        {
+            var text = getText(item) ?? string.Empty;
+            var tokenCount = Math.Max(1, encoding.Encode(text).Count);
+
+            if (currentBucket.Count > 0 && currentTokenCount + tokenCount > tokenBudget)
+            {
+                buckets.Add(currentBucket);
+                currentBucket = new List<T>();
+                currentTokenCount = 0;
+            }
+
+            currentBucket.Add(item);
+            currentTokenCount += tokenCount;
+        }
+
+        if (currentBucket.Count > 0)
+        {
+            buckets.Add(currentBucket);
+        }
+
+        return buckets;
     }
 
     [BlueprintActionDefinition(BlueprintAction.TranslateText)]
