@@ -33,11 +33,11 @@ public class OpenAICompletionService(OpenAiUniversalClient openAIClient) : IOpen
             { "frequency_penalty", request?.FrequencyPenalty ?? 0 },
         };
 
-        bool usesLegacyParams = modelId.Contains("gpt-3") || modelId.Contains("gpt-4");
+        bool usesLegacyParams = UsesLegacyChatParams(modelId);
         if (!usesLegacyParams)
             jsonDictionary.Add("response_format", responseFormat);
 
-        if (request?.Temperature != null && !modelId.Contains("gpt-5"))
+        if (request?.Temperature != null && !IsGpt5Family(modelId))
         {
             jsonDictionary.Add("temperature", request.Temperature);
         }
@@ -47,7 +47,7 @@ public class OpenAICompletionService(OpenAiUniversalClient openAIClient) : IOpen
             jsonDictionary.Add("max_completion_tokens", request.MaximumTokens);
         }
         
-        if (request?.ReasoningEffort != null && modelId.Contains("gpt-5"))
+        if (request?.ReasoningEffort != null && IsGpt5Family(modelId))
         {
             jsonDictionary.Add("reasoning_effort", request.ReasoningEffort);
         }
@@ -63,6 +63,39 @@ public class OpenAICompletionService(OpenAiUniversalClient openAIClient) : IOpen
 
         var response = await openAIClient.ExecuteWithErrorHandling<ChatCompletionDto>(apiRequest);
         return new(response, true, null);
+    }
+
+    private static bool UsesLegacyChatParams(string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        var normalized = modelId.Trim().ToLowerInvariant();
+
+        // Legacy families that rely on older chat parameter behavior.
+        if (normalized.StartsWith("gpt-3.5"))
+        {
+            return true;
+        }
+
+        if (normalized == "gpt-4" || normalized.StartsWith("gpt-4-") || normalized.StartsWith("gpt-4-32k"))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsGpt5Family(string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        return modelId.Trim().StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase);
     }
 
     public int CalculateTokenCount(string text, string modelId)

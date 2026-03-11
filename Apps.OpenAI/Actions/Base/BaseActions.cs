@@ -263,7 +263,7 @@ public abstract class BaseActions(InvocationContext invocationContext, IFileMana
             { "frequency_penalty", input?.FrequencyPenalty ?? 0 }
         };
 
-        bool usesLegacyParams = model.Contains("gpt-3") || model.Contains("gpt-4");
+        bool usesLegacyParams = UsesLegacyChatParams(model);
         if (usesLegacyParams)
         {
             body.AppendIfNotNull("temperature", input?.Temperature);
@@ -276,6 +276,29 @@ public abstract class BaseActions(InvocationContext invocationContext, IFileMana
         }
 
         return body;
+    }
+
+    private static bool UsesLegacyChatParams(string model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return false;
+        }
+
+        var normalized = model.Trim().ToLowerInvariant();
+
+        // Legacy families that rely on older chat parameter behavior.
+        if (normalized.StartsWith("gpt-3.5"))
+        {
+            return true;
+        }
+
+        if (normalized == "gpt-4" || normalized.StartsWith("gpt-4-") || normalized.StartsWith("gpt-4-32k"))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     protected async Task<string> IdentifySourceLanguage(TextChatModelIdentifier modelIdentifier, string content)
