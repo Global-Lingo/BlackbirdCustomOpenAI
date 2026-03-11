@@ -70,7 +70,7 @@ Actions are grouped below. Optional inputs are listed as Advanced settings.
 
 ### Translation
 
-- **Translate** Translates file content from a CMS or file storage and outputs localized content for compatible actions. Advanced settings: **Source language**: Override the source language if it is not already set in the file. **Output file handling**: Determine the format of the output file. The default Blackbird behavior is to convert to XLIFF for future steps. **Additional instructions**: Additional instructions to guide the translation. **Bucket size**: Number of source texts to translate at once (default 1500).
+- **Translate** Translates file content from a CMS or file storage and outputs localized content for compatible actions. Advanced settings: **Source language**: Override the source language if it is not already set in the file. **Output file handling**: Determine the format of the output file. The default Blackbird behavior is to convert to XLIFF for future steps. **Additional instructions**: Additional instructions to guide the translation. **Bucket size**: Approximate maximum source tokens per translation bucket (default 4000).
 - **Translate in background** Starts background translation for a file and outputs a batch ID to download results later.
 - **Translate text** Outputs localized text for the provided input text.
 
@@ -128,7 +128,9 @@ Actions are grouped below. Optional inputs are listed as Advanced settings.
 
 ### Bucket size, performance and cost
 
-Files can contain a lot of segments. Each action takes your segments and sends them to OpenAI for processing. It's possible that the amount of segments is so high that the prompt exceeds to model's context window or that the model takes longer than Blackbird actions are allowed to take. This is why we have introduced the bucket size parameter. You can tweak the bucket size parameter to determine how many segments to send to OpenAI at once. This will allow you to split the workload into different OpenAI calls. The trade-off is that the same context prompt needs to be send along with each request (which increases the tokens used). From experiments we have found that a bucket size of 1500 is sufficient for gpt-4o. That's why 1500 is the default bucket size, however other models may require different bucket sizes.
+Files can contain a lot of segments. Each action takes your segments and sends them to OpenAI for processing. It's possible that the amount of content is so high that the prompt exceeds a model's context window or that processing takes longer than Blackbird actions are allowed to take. This is why we introduced the bucket size parameter. For Translation, bucket size is the approximate number of source tokens to send to OpenAI at once. This allows the workload to be split into different OpenAI calls while still operating on segment-based content. The trade-off is that the same context prompt is sent with each request (which increases token usage). For Translation, the current default bucket size is 4000. Token estimation for Translation uses `cl100k_base` by default.
+
+Note: token-based bucket sizing currently applies to Translation only; other actions still use segment-count bucketing.
 
 ### Temperatures
 
