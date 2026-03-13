@@ -23,4 +23,7 @@ public class ContentProcessingResult : ITranslateFileOutput
 
     [Display("System prompt")]
     public string SystemPrompt { get; set; }
+
+    [Display("Dropped buckets message")]
+    public string? DroppedBucketsMessage { get; set; }
 }

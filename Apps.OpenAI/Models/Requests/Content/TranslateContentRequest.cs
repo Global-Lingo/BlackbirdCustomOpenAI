@@ -20,4 +20,7 @@ public class TranslateContentRequest : ITranslateFileInput
 
     [Display("Output file handling", Description = "Determine the format of the output file. The default Blackbird behavior is to convert to XLIFF for future steps."), StaticDataSource(typeof(OpenAiProcessFileFormatHandler))]
     public string? OutputFileHandling { get; set; }
+
+    [Display("Process draft segments", Description = "If enabled, non-empty target segments that are not in translated or signed-off state can be overwritten. By default, these draft segments are skipped.")]
+    public bool? ProcessDraftSegments { get; set; }
 }

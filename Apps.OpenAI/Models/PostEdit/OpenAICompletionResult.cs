@@ -8,4 +8,5 @@ public record OpenAICompletionResult(
     bool IsSuccess,
     UsageDto Usage,
     List<string> Errors,
-    List<TranslationEntity> Translations);
+    List<TranslationEntity> Translations,
+    bool WasTruncated);

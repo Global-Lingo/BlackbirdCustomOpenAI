@@ -59,6 +59,18 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             result.Usage = completionResult.Usage;
             result.ErrorMessages.AddRange(completionResult.Errors);
             result.UpdatedTranslations.AddRange(completionResult.Translations);
+            result.WasTruncated = completionResult.WasTruncated;
+
+            var returnedIds = completionResult.Translations
+                .Select(x => x.TranslationId)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet();
+
+            result.ExpectedTranslationCount = batch.Count;
+            result.ReturnedTranslationCount = returnedIds.Count;
+            result.MissingTranslationIds = batch.Keys
+                .Where(id => !returnedIds.Contains(id))
+                .ToList();
 
             return result;
         }
@@ -75,6 +87,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
         var errors = new List<string>();
         var translations = new List<TranslationEntity>();
         var usage = new UsageDto();
+        var wasTruncated = false;
         var openaiService = new OpenAICompletionService(openAIClient);
         var deserializationService = new ResponseDeserializationService();
 
@@ -103,6 +116,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
 
             if (choice.FinishReason == "length")
             {
+                wasTruncated = true;
                 errors.Add($"Attempt {currentAttempt}/{options.MaxRetryAttempts}: The response from OpenAI was truncated. Try reducing the batch size.");
             }
 
@@ -118,6 +132,6 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             }
         }
 
-        return new OpenAICompletionResult(success, usage, errors, translations);
+        return new OpenAICompletionResult(success, usage, errors, translations, wasTruncated);
     }
 }

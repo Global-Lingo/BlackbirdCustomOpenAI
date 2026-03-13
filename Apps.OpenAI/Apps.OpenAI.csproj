@@ -2,11 +2,11 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
-	  <Product>GLCustomOpenAI</Product>
+	  <Product>GLCustomOpenAI20260311</Product>
 	  <Description>Custom OpenAI integration for my workspace</Description>
-	  <Version>1.0.0</Version>
-	  <AssemblyName>Apps.GLCustomOpenAI</AssemblyName>
-    <PackageId>Apps.GLCustomOpenAI</PackageId>
+	  <Version>1.1.0</Version>
+  	  <AssemblyName>Apps.GLCustomOpenAI20260311</AssemblyName>
+    <PackageId>Apps.GLCustomOpenAI20260311</PackageId>
   </PropertyGroup>
 
   <ItemGroup>

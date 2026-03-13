@@ -54,6 +54,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         var neverFail = false;
         var tokenBudgetPerBucket = bucketSize ?? DefaultTokenBudgetPerBucket;
         var maxParallelBatches = parallelRequests ?? 3;
+        var processDraftSegments = input.ProcessDraftSegments ?? false;
         if (maxParallelBatches < 1 || maxParallelBatches > 10)
         {
             throw new PluginMisconfigurationException("Parallel requests must be between 1 and 10.");
@@ -86,9 +87,11 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         // Step 6: Prepare translation services and shared state for aggregated results.
         var batchProcessingService = new BatchProcessingService(UniversalClient, FileManagementClient);
 
-        var systemprompt = string.Empty;
+        var systemPrompt = string.Empty;
         var errors = new List<string>();
         var usages = new List<UsageDto>();
+        var droppedBucketWarnings = new List<string>();
+        var untranslatedSegmentsInDroppedBuckets = 0;
         var aggregationLock = new object();
 
         // Step 7: Configure batch translation options passed to the processing service.
@@ -97,24 +100,57 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             content.SourceLanguage,
             content.TargetLanguage,
             prompt,
-            systemprompt,
+            systemPrompt,
             false,
             glossary.Glossary,
             true,
-            3,
+            1,
             null,
             reasoningEffortRequest.ReasoningEffort,
             content.Notes);
 
-        // Step 8: Define per-batch execution logic, including deduplication and fallback mapping.
+        // Step 8: Define per-batch execution logic, including one-time split fallback and stable result mapping.
         async Task<List<TranslationEntity>> BatchTranslate(List<(Unit Unit, Segment Segment)> batch, int batchNumber)
         {
             var batchList = batch;
-            var idSegments = batchList.Select((x, i) => new { Id = i + 1, Value = x }).ToDictionary(x => x.Id.ToString(), x => x.Value.Segment);
+            var indexedBatch = batchList.Select((x, i) => (OriginalIndex: i + 1, x.Unit, x.Segment)).ToList();
             
             var translationLookup = new Dictionary<string, TranslationEntity>();
-            try
+            Dictionary<string, TranslationEntity> ProcessTranslationsResult(
+                List<(int OriginalIndex, Unit Unit, Segment Segment)> sourceBatch,
+                IEnumerable<TranslationEntity> translations)
             {
+                var translationMap = new Dictionary<string, TranslationEntity>();
+                foreach (var translation in translations)
+                {
+                    if (!int.TryParse(translation.TranslationId, out var localId))
+                    {
+                        continue;
+                    }
+
+                    var localIndex = localId - 1;
+                    if (localIndex < 0 || localIndex >= sourceBatch.Count)
+                    {
+                        continue;
+                    }
+
+                    var originalId = sourceBatch[localIndex].OriginalIndex.ToString();
+                    translationMap.TryAdd(originalId, new TranslationEntity
+                    {
+                        TranslationId = originalId,
+                        TranslatedText = translation.TranslatedText
+                    });
+                }
+
+                return translationMap;
+            }
+
+            async Task<BatchResult> ExecuteBatchAsync(List<(int OriginalIndex, Unit Unit, Segment Segment)> requestBatch)
+            {
+                var idSegments = requestBatch
+                    .Select((x, i) => new { Id = i + 1, Value = x })
+                    .ToDictionary(x => x.Id.ToString(), x => x.Value.Segment);
+
                 var batchResult = await batchProcessingService.ProcessBatchAsync(idSegments, batchOptions, false);
 
                 var duplicates = batchResult.UpdatedTranslations.GroupBy(x => x.TranslationId)
@@ -124,24 +160,118 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
 
                 lock (aggregationLock)
                 {
-                    systemprompt = batchResult.SystemPrompt;
+                    systemPrompt = batchResult.SystemPrompt;
                     errors.AddRange(duplicates.Select(duplicate => $"Duplicate translation ID found: {duplicate.TranslationId} appears {duplicate.Count} times"));
                     errors.AddRange(batchResult.ErrorMessages);
                     usages.Add(batchResult.Usage);
                 }
 
-                if (batchResult.IsSuccess)
+                return batchResult;
+            }
+
+            // Captures per-bucket diagnostics that indicate potential silent loss:
+            // - model truncation (finish_reason=length)
+            // - missing translation IDs in the response payload.
+            // These are later summarized into DroppedBucketsMessage for UI visibility.
+            void TrackDroppedBucketDiagnostics(string localBatchLabel, BatchResult batchResult)
+            {
+                if (!batchResult.HasIncompleteResponse && !batchResult.WasTruncated)
                 {
-                    foreach (var translation in batchResult.UpdatedTranslations)
-                    {
-                        translationLookup.TryAdd(translation.TranslationId, translation);
-                    }
+                    return;
                 }
 
-                if (!batchResult.IsSuccess && !neverFail)
+                var reasons = new List<string>();
+                if (batchResult.WasTruncated)
+                {
+                    reasons.Add("response truncated");
+                }
+
+                if (batchResult.HasIncompleteResponse)
+                {
+                    reasons.Add($"missing {batchResult.MissingTranslationIds.Count} translation(s)");
+                }
+
+                lock (aggregationLock)
+                {
+                    droppedBucketWarnings.Add($"Batch {localBatchLabel}: {string.Join(", ", reasons)}");
+                    untranslatedSegmentsInDroppedBuckets += batchResult.MissingTranslationIds.Count;
+                }
+            }
+
+            async Task<Dictionary<string, TranslationEntity>> ProcessBatchWithSingleSplitFallbackAsync(
+                List<(int OriginalIndex, Unit Unit, Segment Segment)> currentBatch,
+                string batchLabel)
+            {
+                // First attempt: process the full bucket as-is.
+                var batchResult = await ExecuteBatchAsync(currentBatch);
+
+                if (batchResult.IsSuccess)
+                {
+                    TrackDroppedBucketDiagnostics(batchLabel, batchResult);
+                    return ProcessTranslationsResult(currentBatch, batchResult.UpdatedTranslations);
+                }
+
+                if (ShouldSplitFailedBatch(batchResult.IsSuccess, batchResult.ErrorMessages.Count, currentBatch.Count))
+                {
+                    // One-time adaptive fallback: split failed parent bucket into two child buckets.
+                    // Child buckets are executed directly (no recursive splitting).
+                    var midpoint = currentBatch.Count / 2;
+                    var left = currentBatch.Take(midpoint).ToList();
+                    var right = currentBatch.Skip(midpoint).ToList();
+
+                    lock (aggregationLock)
+                    {
+                        errors.Add($"Batch {batchLabel} failed and was split once into two sub-batches ({left.Count} + {right.Count}).");
+                    }
+
+                    var leftResult = await ExecuteBatchAsync(left);
+                    var rightResult = await ExecuteBatchAsync(right);
+
+                    TrackDroppedBucketDiagnostics($"{batchLabel}.1", leftResult);
+                    TrackDroppedBucketDiagnostics($"{batchLabel}.2", rightResult);
+
+                    if (!leftResult.IsSuccess && !neverFail)
+                    {
+                        throw new PluginApplicationException(
+                            $"Failed to process split batch {batchLabel}.1 (token budget: {tokenBudgetPerBucket}). Errors: {string.Join(", ", leftResult.ErrorMessages)}");
+                    }
+
+                    if (!rightResult.IsSuccess && !neverFail)
+                    {
+                        throw new PluginApplicationException(
+                            $"Failed to process split batch {batchLabel}.2 (token budget: {tokenBudgetPerBucket}). Errors: {string.Join(", ", rightResult.ErrorMessages)}");
+                    }
+
+                    var leftTranslations = leftResult.IsSuccess
+                        ? ProcessTranslationsResult(left, leftResult.UpdatedTranslations)
+                        : new Dictionary<string, TranslationEntity>();
+                    var rightTranslations = rightResult.IsSuccess
+                        ? ProcessTranslationsResult(right, rightResult.UpdatedTranslations)
+                        : new Dictionary<string, TranslationEntity>();
+
+                    foreach (var item in rightTranslations)
+                    {
+                        leftTranslations.TryAdd(item.Key, item.Value);
+                    }
+
+                    return leftTranslations;
+                }
+
+                if (!neverFail)
                 {
                     throw new PluginApplicationException(
-                        $"Failed to process batch {batchNumber} (token budget: {tokenBudgetPerBucket}). Errors: {string.Join(", ", batchResult.ErrorMessages)}");
+                        $"Failed to process batch {batchLabel} (token budget: {tokenBudgetPerBucket}). Errors: {string.Join(", ", batchResult.ErrorMessages)}");
+                }
+
+                return new Dictionary<string, TranslationEntity>();
+            }
+
+            try
+            {
+                var processedTranslations = await ProcessBatchWithSingleSplitFallbackAsync(indexedBatch, batchNumber.ToString());
+                foreach (var translation in processedTranslations)
+                {
+                    translationLookup.TryAdd(translation.Key, translation.Value);
                 }
             }
             catch (Exception ex) when (neverFail)
@@ -176,17 +306,16 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         }
 
         // Step 9: Extract initial segments eligible for translation and compute counters.
-        var units = content.GetUnits();        
+        var units = content.GetUnits().ToList();
         result.TotalSegmentsCount = units.SelectMany(x => x.Segments).Count();
-        units = units.Where(x => x.IsInitial);
-        var segments = units.Where(x => x.IsInitial).SelectMany(x => x.Segments);
-        result.TotalTranslatable = segments.Count();
 
         // Step 10: Flatten unit-segment pairs so updates can be re-applied to original units.
         var segmentsToTranslate = units
-            .Where(x => x.IsInitial)
             .SelectMany(unit => unit.Segments.Select(segment => (Unit: unit, Segment: segment)))
+            .Where(x => ShouldProcessSegmentForTranslateContent(x.Segment, processDraftSegments))
             .ToList();
+
+        result.TotalTranslatable = segmentsToTranslate.Count;
 
         // Step 11: Build translation buckets using token budget instead of segment count.
         var translationBatches = await BuildTokenBucketsAsync(
@@ -210,7 +339,8 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
 
         result.ProcessedBatchesCount = translationBatches.Count;
         result.Usage = UsageDto.Sum(usages);
-        result.SystemPrompt = systemprompt;
+        result.SystemPrompt = systemPrompt;
+        result.DroppedBucketsMessage = BuildDroppedBucketsMessage(droppedBucketWarnings, untranslatedSegmentsInDroppedBuckets);
 
         // Step 14: Wrap per-batch execution with semaphore acquire/release.
         async Task<List<(Unit Unit, Segment Segment, TranslationEntity Translation)>> ProcessBatch(
@@ -235,8 +365,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         {
             foreach(var (segment, translation) in results) 
             {
-                var shouldTranslateFromState = segment.State == null || segment.State == SegmentState.Initial;
-                if (!shouldTranslateFromState || string.IsNullOrEmpty(translation.TranslatedText))
+                if (string.IsNullOrEmpty(translation.TranslatedText))
                 {
                     continue;
                 }
@@ -276,6 +405,55 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         // Step 17: Return aggregated processing metadata and output file reference.
         return result;
     }    
+
+    private static bool ShouldProcessSegmentForTranslateContent(Segment segment, bool processDraftSegments)
+    {
+        if (segment.IsIgnorbale)
+        {
+            return false;
+        }
+
+        if (segment.State == SegmentState.Translated || segment.State == SegmentState.Final)
+        {
+            return false;
+        }
+
+        var hasTarget = !string.IsNullOrWhiteSpace(segment.GetTarget());
+        return processDraftSegments || !hasTarget;
+    }
+
+    private static bool ShouldSplitFailedBatch(bool isSuccess, int errorCount, int batchSize)
+    {
+        if (isSuccess || batchSize <= 1 || errorCount == 0)
+        {
+            return false;
+        }
+
+        // Split only once (parent -> 2 children). Children are executed directly without further splitting.
+        return true;
+    }
+
+    private static string? BuildDroppedBucketsMessage(List<string> droppedBucketWarnings, int untranslatedSegmentsInDroppedBuckets)
+    {
+        // Keep this output deterministic and parse-friendly for UI consumers.
+        // Format: key-value pairs separated by ';', detail entries separated by '|'.
+        if (droppedBucketWarnings.Count == 0)
+        {
+            return null;
+        }
+
+        const int maxDetails = 5;
+        var visibleDetails = droppedBucketWarnings.Take(maxDetails).ToList();
+        var moreCount = droppedBucketWarnings.Count - visibleDetails.Count;
+        var detailsText = string.Join(" | ", visibleDetails);
+        if (moreCount > 0)
+        {
+            detailsText += $" | +{moreCount} more";
+        }
+
+        return $"status=warning; dropped_buckets={droppedBucketWarnings.Count}; " +
+               $"unchanged_segments={untranslatedSegmentsInDroppedBuckets}; details={detailsText}";
+    }
 
     [Action("Translate in background", Description = "Starts background translation for a file and outputs a batch ID to download results later.")]
     public async Task<BackgroundProcessingResponse> TranslateInBackground([ActionParameter] StartBackgroundProcessRequest startBackgroundProcessRequest)
