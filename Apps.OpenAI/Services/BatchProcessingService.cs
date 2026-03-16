@@ -4,6 +4,7 @@ using Apps.OpenAI.Dtos;
 using Apps.OpenAI.Models.Entities;
 using Apps.OpenAI.Models.PostEdit;
 using Apps.OpenAI.Models.Requests.Chat;
+using Apps.OpenAI.Utils.Xliff;
 using Blackbird.Applications.SDK.Extensions.FileManagement.Interfaces;
 using Blackbird.Filters.Transformations;
 using System;
@@ -58,7 +59,26 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             result.IsSuccess = completionResult.IsSuccess;
             result.Usage = completionResult.Usage;
             result.ErrorMessages.AddRange(completionResult.Errors);
-            result.UpdatedTranslations.AddRange(completionResult.Translations);
+
+            foreach (var translation in completionResult.Translations)
+            {
+                if (!batch.TryGetValue(translation.TranslationId, out var segment))
+                {
+                    result.ErrorMessages.Add(
+                        $"Received translation with unknown translation_id '{translation.TranslationId}'. The item was ignored.");
+                    continue;
+                }
+
+                if (!XliffTagValidator.HasValidTagStructure(segment.GetSource(), translation.TranslatedText))
+                {
+                    result.ErrorMessages.Add(
+                        $"translation_id '{translation.TranslationId}' was ignored because XLIFF tags do not match source structure.");
+                    continue;
+                }
+
+                result.UpdatedTranslations.Add(translation);
+            }
+
             result.WasTruncated = completionResult.WasTruncated;
 
             var returnedIds = completionResult.Translations
