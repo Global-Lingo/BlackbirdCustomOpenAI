@@ -27,7 +27,7 @@ public class ContentGlossaryService(IFileManagementClient fileManagementClient)
         public List<GlossaryTermEntry> ConceptEntries { get; set; } = new();
     }
 
-    public async Task<string?> BuildGlossaryPromptAsync(FileReference? glossary, IEnumerable<Segment> segments, bool filter, bool? overwritePrompt = false)
+    public async Task<string?> BuildGlossaryPromptAsync(FileReference? glossary, IEnumerable<Segment> segments, bool filter, bool? overwritePrompt = false, bool caseSensitive = false)
     {
         if(glossary == null)
         {
@@ -47,7 +47,7 @@ public class ContentGlossaryService(IFileManagementClient fileManagementClient)
         foreach (var entry in blackbirdGlossary.ConceptEntries)
         {
             var allTerms = entry.LanguageSections.SelectMany(x => x.Terms.Select(y => y.Term));
-            if (filter && !IsEntryRelevantToSources(allTerms, sourcesContent))
+            if (filter && !IsEntryRelevantToSources(allTerms, sourcesContent, caseSensitive))
             {
                 continue;
             }
@@ -109,11 +109,12 @@ public class ContentGlossaryService(IFileManagementClient fileManagementClient)
         return glossaryPrompt.ToString();
     }
 
-    private bool IsEntryRelevantToSources(IEnumerable<string> terms, IEnumerable<string> sourcesContent)
+    private bool IsEntryRelevantToSources(IEnumerable<string> terms, IEnumerable<string> sourcesContent, bool caseSensitive = false)
     {
+        var regexOptions = caseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
         return terms.Any(term => 
             sourcesContent.Any(source => 
-                Regex.IsMatch(source, $@"\b{Regex.Escape(term)}\b", RegexOptions.IgnoreCase)));
+                Regex.IsMatch(source, $@"\b{Regex.Escape(term)}\b", regexOptions)));
     }
 }
 

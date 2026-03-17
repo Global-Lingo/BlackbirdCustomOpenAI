@@ -7,5 +7,5 @@ namespace Apps.OpenAI.Services.Abstract;
 
 public interface IGlossaryService
 {
-    Task<string?> BuildGlossaryPromptAsync(FileReference? glossary, IEnumerable<TranslationUnit> translationUnits, bool filter);
+    Task<string?> BuildGlossaryPromptAsync(FileReference? glossary, IEnumerable<TranslationUnit> translationUnits, bool filter, bool caseSensitive = false);
 }

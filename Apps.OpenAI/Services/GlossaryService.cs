@@ -13,7 +13,7 @@ namespace Apps.OpenAI.Services;
 
 public class GlossaryService(IFileManagementClient fileManagementClient) : IGlossaryService
 {
-    public async Task<string?> BuildGlossaryPromptAsync(FileReference? glossary, IEnumerable<TranslationUnit> translationUnits, bool filter)
+    public async Task<string?> BuildGlossaryPromptAsync(FileReference? glossary, IEnumerable<TranslationUnit> translationUnits, bool filter, bool caseSensitive = false)
     {
         if(glossary == null)
         {
@@ -33,7 +33,7 @@ public class GlossaryService(IFileManagementClient fileManagementClient) : IGlos
         foreach (var entry in blackbirdGlossary.ConceptEntries)
         {
             var allTerms = entry.LanguageSections.SelectMany(x => x.Terms.Select(y => y.Term));
-            if (filter && !IsEntryRelevantToSources(allTerms, sourcesContent))
+            if (filter && !IsEntryRelevantToSources(allTerms, sourcesContent, caseSensitive))
             {
                 continue;
             }
@@ -61,10 +61,11 @@ public class GlossaryService(IFileManagementClient fileManagementClient) : IGlos
         return entriesIncluded ? glossaryPrompt + glossaryPromptPart.ToString() : null;
     }
 
-    private bool IsEntryRelevantToSources(IEnumerable<string> terms, IEnumerable<string> sourcesContent)
+    private bool IsEntryRelevantToSources(IEnumerable<string> terms, IEnumerable<string> sourcesContent, bool caseSensitive = false)
     {
+        var regexOptions = caseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
         return terms.Any(term => 
             sourcesContent.Any(source => 
-                Regex.IsMatch(source, $@"\b{Regex.Escape(term)}\b", RegexOptions.IgnoreCase)));
+                Regex.IsMatch(source, $@"\b{Regex.Escape(term)}\b", regexOptions)));
     }
 }

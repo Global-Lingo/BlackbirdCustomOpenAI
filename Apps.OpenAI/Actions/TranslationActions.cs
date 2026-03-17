@@ -104,10 +104,15 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             false,
             glossary.Glossary,
             true,
+            glossary.CaseSensitiveGlossary ?? false,
             1,
             null,
             reasoningEffortRequest.ReasoningEffort,
-            content.Notes);
+            content.Notes,
+            input.ClientProfile,
+            input.SummarisedStyleGuide,
+            input.ToneOfVoice,
+            input.FormalityLevel);
 
         // Step 8: Define per-batch execution logic, including one-time split fallback and stable result mapping.
         async Task<List<TranslationEntity>> BatchTranslate(List<(Unit Unit, Segment Segment)> batch, int batchNumber)

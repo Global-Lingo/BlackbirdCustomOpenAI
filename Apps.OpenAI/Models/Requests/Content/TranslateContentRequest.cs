@@ -23,4 +23,17 @@ public class TranslateContentRequest : ITranslateFileInput
 
     [Display("Process draft segments", Description = "If enabled, non-empty target segments that are not in translated or signed-off state can be overwritten. By default, these draft segments are skipped.")]
     public bool? ProcessDraftSegments { get; set; }
+
+    [Display("Client profile")]
+    public string? ClientProfile { get; set; }
+
+    [Display("Summarised style guide")]
+    public string? SummarisedStyleGuide { get; set; }
+
+    [Display("Tone of voice")]
+    [StaticDataSource(typeof(ToneOfVoiceHandler))]
+    public string? ToneOfVoice { get; set; }
+
+    [Display("Formality level")]
+    public string? FormalityLevel { get; set; }
 }

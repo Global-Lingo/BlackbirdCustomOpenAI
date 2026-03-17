@@ -70,7 +70,7 @@ Actions are grouped below. Optional inputs are listed as Advanced settings.
 
 ### Translation
 
-- **Translate** Translates file content from a CMS or file storage and outputs localized content for compatible actions. Advanced settings: **Source language**: Override the source language if it is not already set in the file. **Output file handling**: Determine the format of the output file. The default Blackbird behavior is to convert to XLIFF for future steps. **Additional instructions**: Additional instructions to guide the translation. **Bucket size**: Approximate maximum source tokens per translation bucket (default 4000).
+- **Translate** Translates file content from a CMS or file storage and outputs localized content for compatible actions. Advanced settings: **Source language**: Override the source language if it is not already set in the file. **Output file handling**: Determine the format of the output file. The default Blackbird behavior is to convert to XLIFF for future steps. **Additional instructions**: Additional instructions to guide the translation. **Client profile**: Additional context about the end client profile to include in the custom system prompt. **Summarised style guide**: Summarized style guidance to include in the custom system prompt. **Tone of voice**: Desired tone of voice to include in the custom system prompt. **Formality level**: Desired formality level to include in the custom system prompt. **Bucket size**: Approximate maximum source tokens per translation bucket (default 4000).
 - **Translate in background** Starts background translation for a file and outputs a batch ID to download results later.
 - **Translate text** Outputs localized text for the provided input text.
 
@@ -108,7 +108,7 @@ Actions are grouped below. Optional inputs are listed as Advanced settings.
 
 ### Glossaries
 
-- **Extract glossary** Extracts glossary terms from text and outputs a glossary file. Advanced settings: **Name**: Name of the output glossary file.
+- **Extract glossary** Extracts glossary terms from text and outputs a glossary file. Advanced settings: **Name**: Name of the output glossary file. **Case-sensitive extraction**: When enabled, extracted glossary term deduplication is case-sensitive. Set to `false` to treat terms that differ only by letter case as duplicates.
 
 ### Audio
 

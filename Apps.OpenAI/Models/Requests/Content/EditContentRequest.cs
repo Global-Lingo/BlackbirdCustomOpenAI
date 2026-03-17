@@ -23,6 +23,9 @@ public class EditContentRequest : IEditFileInput
     [Display("Filter glossary terms")]
     public bool? FilterGlossary { get; set; }
 
+    [Display("Case-sensitive glossary", Description = "When enabled, glossary term matching against source text is case-sensitive. Defaults to false (case-insensitive).")]
+    public bool? CaseSensitiveGlossary { get; set; }
+
     [Display("Modified by")]
     public string? ModifiedBy { get; set; }
 

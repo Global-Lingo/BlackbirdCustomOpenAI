@@ -31,7 +31,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             if (options.Glossary != null)
             {
                 glossaryPrompt = await glossaryService.BuildGlossaryPromptAsync(
-                    options.Glossary, batch.Select(x => x.Value), options.FilterGlossary, options.OverwritePrompts);
+                    options.Glossary, batch.Select(x => x.Value), options.FilterGlossary, options.OverwritePrompts, options.CaseSensitiveGlossary);
             }
 
             var userPrompt = promptBuilderService.BuildUserPrompt(batch, postEdit);
@@ -43,7 +43,11 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
                     options.Prompt,
                     glossaryPrompt,
                     postEdit,
-                    options.Notes);
+                    options.Notes,
+                    options.ClientProfile,
+                    options.SummarisedStyleGuide,
+                    options.ToneOfVoice,
+                    options.FormalityLevel);
 
             result.SystemPrompt = systemPrompt;
 

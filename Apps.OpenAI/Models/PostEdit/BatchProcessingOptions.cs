@@ -13,7 +13,12 @@ public record BatchProcessingOptions(
     bool OverwritePrompts,
     FileReference? Glossary,
     bool FilterGlossary,
+    bool CaseSensitiveGlossary,
     int MaxRetryAttempts,
     int? MaxTokens,
     string? ReasoningEffort,
-    List<Note>? Notes);
+    List<Note>? Notes,
+    string? ClientProfile = null,
+    string? SummarisedStyleGuide = null,
+    string? ToneOfVoice = null,
+    string? FormalityLevel = null);

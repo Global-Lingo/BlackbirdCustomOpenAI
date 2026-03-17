@@ -9,7 +9,17 @@ namespace Apps.OpenAI.Services;
 
 public class ContentPromptBuilderService
 {
-    public string BuildSystemPrompt(string sourceLanguage, string targetLanguage, string? additionalPrompt, string? glossaryPrompt, bool isPostEdit, List<Note>? notes)
+    public string BuildSystemPrompt(
+        string sourceLanguage,
+        string targetLanguage,
+        string? additionalPrompt,
+        string? glossaryPrompt,
+        bool isPostEdit,
+        List<Note>? notes,
+        string? clientProfile = null,
+        string? summarisedStyleGuide = null,
+        string? toneOfVoice = null,
+        string? formalityLevel = null)
     {
         var fullSourceLanguage = LanguageUtils.GetFullLanguageName(sourceLanguage);
         var fullTargetLanguage = LanguageUtils.GetFullLanguageName(targetLanguage);
@@ -65,6 +75,35 @@ public class ContentPromptBuilderService
             foreach (var note in notes)
             {
                 prompt.AppendLine($"{note.Category}: {note.Text}");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(clientProfile)
+            || !string.IsNullOrWhiteSpace(summarisedStyleGuide)
+            || !string.IsNullOrWhiteSpace(toneOfVoice)
+            || !string.IsNullOrWhiteSpace(formalityLevel))
+        {
+            prompt.AppendLine();
+            prompt.AppendLine("### STYLE CONTEXT");
+
+            if (!string.IsNullOrWhiteSpace(clientProfile))
+            {
+                prompt.AppendLine($"Client profile: {clientProfile}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(summarisedStyleGuide))
+            {
+                prompt.AppendLine($"Summarised style guide: {summarisedStyleGuide}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(toneOfVoice))
+            {
+                prompt.AppendLine($"Tone of voice: {toneOfVoice}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(formalityLevel))
+            {
+                prompt.AppendLine($"Formality level: {formalityLevel}");
             }
         }
 

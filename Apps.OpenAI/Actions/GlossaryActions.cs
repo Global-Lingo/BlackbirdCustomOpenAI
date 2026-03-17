@@ -16,7 +16,7 @@ using Blackbird.Applications.Sdk.Glossaries.Utils.Converters;
 using Newtonsoft.Json;
 using Blackbird.Applications.Sdk.Glossaries.Utils.Dtos;
 using System.Net.Mime;
-using MoreLinq;
+using Apps.OpenAI.Utils;
 
 namespace Apps.OpenAI.Actions;
 
@@ -45,6 +45,7 @@ public class GlossaryActions(InvocationContext invocationContext, IFileManagemen
         try
         {
             items = JsonConvert.DeserializeObject<GlossaryItemWrapper>(response.Choices.First().Message.Content).Result;
+            items = GlossaryExtractionUtils.RemoveDuplicateEntries(items, input.CaseSensitiveExtraction ?? true);
         }
         catch
         {
