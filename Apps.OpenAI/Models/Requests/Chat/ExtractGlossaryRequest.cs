@@ -17,8 +17,5 @@ namespace Apps.OpenAI.Models.Requests.Chat
 
         public string? Name { get; set; }
 
-        [Display("Case-sensitive extraction")]
-        public bool? CaseSensitiveExtraction { get; set; }
-
     }
 }

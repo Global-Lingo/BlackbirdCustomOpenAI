@@ -26,4 +26,7 @@ public class ContentProcessingResult : ITranslateFileOutput
 
     [Display("Dropped buckets message")]
     public string? DroppedBucketsMessage { get; set; }
+
+    [Display("Error messages")]
+    public string? ErrorMessages { get; set; }
 }

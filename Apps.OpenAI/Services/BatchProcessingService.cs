@@ -1,6 +1,7 @@
 ﻿using Apps.OpenAI.Api;
 using Apps.OpenAI.Constants;
 using Apps.OpenAI.Dtos;
+using Blackbird.Applications.Sdk.Common.Exceptions;
 using Apps.OpenAI.Models.Entities;
 using Apps.OpenAI.Models.PostEdit;
 using Apps.OpenAI.Models.Requests.Chat;
@@ -97,6 +98,12 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
                 .ToList();
 
             return result;
+        }
+        catch (PluginMisconfigurationException)
+        {
+            // Configuration errors (e.g. unsupported model) must propagate so the caller
+            // can present them as misconfiguration rather than swallowing them silently.
+            throw;
         }
         catch (Exception ex)
         {

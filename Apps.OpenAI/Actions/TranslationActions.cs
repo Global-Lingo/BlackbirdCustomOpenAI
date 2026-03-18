@@ -336,7 +336,31 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             .ToList();
 
         // Step 13: Execute all batches, then regroup translated segments by their parent unit.
-        var processedSegments = (await Task.WhenAll(batchTasks)).SelectMany(x => x).ToList();
+        // Await via a stored Task so we can inspect all inner exceptions if multiple batches fail.
+        var whenAllTask = Task.WhenAll(batchTasks);
+        List<(Unit Unit, Segment Segment, TranslationEntity Translation)> processedSegments;
+        try
+        {
+            await whenAllTask;
+            processedSegments = whenAllTask.Result.SelectMany(x => x).ToList();
+        }
+        catch
+        {
+            var innerExceptions = whenAllTask.Exception?.Flatten().InnerExceptions.ToList()
+                ?? new List<Exception> { new Exception("Unknown error") };
+
+            // Re-throw config errors (wrong model, invalid settings) as-is so the UI labels them correctly.
+            var configError = innerExceptions.OfType<PluginMisconfigurationException>().FirstOrDefault();
+            if (configError != null)
+            {
+                throw configError;
+            }
+
+            var failedMessages = innerExceptions.Select(e => e.Message).ToList();
+            throw new PluginApplicationException(
+                $"Translation failed. {failedMessages.Count} batch(es) could not be processed:{Environment.NewLine}{string.Join(Environment.NewLine, failedMessages)}");
+        }
+
         var processedBatches = processedSegments
             .GroupBy(x => x.Unit)
             .Select(group => (group.Key, group.Select(x => (x.Segment, x.Translation)).ToList()))
@@ -408,6 +432,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         }
 
         // Step 17: Return aggregated processing metadata and output file reference.
+        result.ErrorMessages = errors.Count > 0 ? string.Join(Environment.NewLine, errors) : null;
         return result;
     }    
 

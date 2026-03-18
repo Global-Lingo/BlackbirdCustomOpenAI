@@ -108,7 +108,7 @@ Actions are grouped below. Optional inputs are listed as Advanced settings.
 
 ### Glossaries
 
-- **Extract glossary** Extracts glossary terms from text and outputs a glossary file. Advanced settings: **Name**: Name of the output glossary file. **Case-sensitive extraction**: When enabled, extracted glossary term deduplication is case-sensitive. Set to `false` to treat terms that differ only by letter case as duplicates.
+- **Extract glossary** Extracts glossary terms from text and outputs a glossary file.
 
 ### Audio
 
