@@ -51,6 +51,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
                     options.FormalityLevel);
 
             result.SystemPrompt = systemPrompt;
+            result.UserPrompt = userPrompt;
 
             var messages = new List<ChatMessageDto>
             {
@@ -64,6 +65,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             result.IsSuccess = completionResult.IsSuccess;
             result.Usage = completionResult.Usage;
             result.ErrorMessages.AddRange(completionResult.Errors);
+            result.RawResponse = completionResult.RawResponse;
 
             foreach (var translation in completionResult.Translations)
             {
@@ -124,6 +126,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
 
         int currentAttempt = 0;
         bool success = false;
+        string rawResponse = string.Empty;
         while (!success && currentAttempt < options.MaxRetryAttempts)
         {
             currentAttempt++;
@@ -144,6 +147,7 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             usage = chatCompletionResult.ChatCompletion.Usage;
             var choice = chatCompletionResult.ChatCompletion.Choices.First();
             var content = choice.Message.Content;
+            rawResponse = content;
 
             if (choice.FinishReason == "length")
             {
@@ -163,6 +167,6 @@ public class BatchProcessingService(OpenAiUniversalClient openAIClient, IFileMan
             }
         }
 
-        return new OpenAICompletionResult(success, usage, errors, translations, wasTruncated);
+        return new OpenAICompletionResult(success, usage, errors, translations, wasTruncated, rawResponse, messages.OfType<ChatMessageDto>().LastOrDefault(m => m.Role == MessageRoles.User)?.Content ?? string.Empty);
     }
 }

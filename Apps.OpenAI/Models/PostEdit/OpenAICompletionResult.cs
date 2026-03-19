@@ -9,4 +9,6 @@ public record OpenAICompletionResult(
     UsageDto Usage,
     List<string> Errors,
     List<TranslationEntity> Translations,
-    bool WasTruncated);
+    bool WasTruncated,
+    string RawResponse,
+    string UserPrompt);

@@ -32,6 +32,8 @@ using Blackbird.Filters.Xliff.Xliff1;
 using TiktokenSharp;
 
 namespace Apps.OpenAI.Actions;
+using System.Xml.Linq;
+using Apps.OpenAI.Models.Entities;
 
 [ActionList("Translation")]
 public class TranslationActions(InvocationContext invocationContext, IFileManagementClient fileManagementClient) 
@@ -50,7 +52,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         [ActionParameter, Display("Bucket size", Description = "Specify the approximate max number of source tokens per translation bucket. Default value: 4000. (See our documentation for an explanation)")] int? bucketSize = null,
         [ActionParameter, Display("Parallel requests", Description = "Maximum number of translation buckets processed in parallel. Default value: 3.")] int? parallelRequests = null)
     {
-        // Step 1: Resolve runtime options and validate parallelism constraints.
+        //  Resolve runtime options and validate parallelism constraints.
         var neverFail = false;
         var tokenBudgetPerBucket = bucketSize ?? DefaultTokenBudgetPerBucket;
         var maxParallelBatches = parallelRequests ?? 3;
@@ -64,27 +66,55 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             throw new PluginMisconfigurationException("Bucket size must be greater than 0.");
         }
 
-        // Step 2: Download and parse the input file into transformation content.
+        //  Download and parse the input file into transformation content.
         var result = new ContentProcessingResult();
         var stream = await fileManagementClient.DownloadAsync(input.File);
         var content = await ErrorHandler.ExecuteWithErrorHandlingAsync(() =>
             Transformation.Parse(stream, input.File.Name)
         );
 
-        // Step 3: Merge language metadata from UI input only when file metadata is missing.
+        // Parse XLIFF for fuzzy matches
+        stream.Position = 0;
+        string xliffString;
+        using (var reader = new StreamReader(stream, leaveOpen: true))
+        {
+            xliffString = await reader.ReadToEndAsync();
+        }
+        var fuzzyMatchMap = ParseXliffForFuzzyMatches(xliffString);
+
+        // Prepare SegmentWithFuzzyContext list
+        var units = content.GetUnits().ToList();
+        var segmentsToTranslate = units
+            .SelectMany(unit => unit.Segments.Select(segment => (Unit: unit, Segment: segment)))
+            .Where(x => ShouldProcessSegmentForTranslateContent(x.Segment, processDraftSegments))
+            .ToList();
+
+        var segmentWrappers = segmentsToTranslate
+            .Select(x => new SegmentWithFuzzyContext
+            {
+                Segment = x.Segment,
+                FuzzyContext = fuzzyMatchMap.TryGetValue(x.Segment.Id ?? string.Empty, out var ctx) ?
+                    new FuzzyMatchContext { MatchedText = ctx.MatchedText, Similarity = ctx.Similarity } : null
+            })
+            .ToList();
+
+        // segmentWrappers is now ready for batching and prompt construction
+
+
+        //  Merge language metadata from UI input only when file metadata is missing.
         content.SourceLanguage ??= input.SourceLanguage;
         content.TargetLanguage ??= input.TargetLanguage;        
 
-        // Step 4: Ensure target language exists; source language can still be auto-detected.
+        //  Ensure target language exists; source language can still be auto-detected.
         if (content.TargetLanguage == null) throw new PluginMisconfigurationException("The target language is not defined yet. Please assign the target language in this action.");
 
-        // Step 5: Auto-detect source language when it is absent in both file and UI input.
+        //  Auto-detect source language when it is absent in both file and UI input.
         if (content.SourceLanguage == null)
         {
             content.SourceLanguage = await IdentifySourceLanguage(modelIdentifier, content.Source().GetPlaintext());
         }
 
-        // Step 6: Prepare translation services and shared state for aggregated results.
+        //  Prepare translation services and shared state for aggregated results.
         var batchProcessingService = new BatchProcessingService(UniversalClient, FileManagementClient);
 
         var systemPrompt = string.Empty;
@@ -93,8 +123,10 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         var droppedBucketWarnings = new List<string>();
         var untranslatedSegmentsInDroppedBuckets = 0;
         var aggregationLock = new object();
+        string firstBatchUserPrompt = null;
+        string firstBatchRawResponse = null;
 
-        // Step 7: Configure batch translation options passed to the processing service.
+        //  Configure batch translation options passed to the processing service.
         var batchOptions = new BatchProcessingOptions(
             UniversalClient.GetModel(modelIdentifier.ModelId),
             content.SourceLanguage,
@@ -114,7 +146,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             input.ToneOfVoice,
             input.FormalityLevel);
 
-        // Step 8: Define per-batch execution logic, including one-time split fallback and stable result mapping.
+        //  Define per-batch execution logic, including one-time split fallback and stable result mapping.
         async Task<List<TranslationEntity>> BatchTranslate(List<(Unit Unit, Segment Segment)> batch, int batchNumber)
         {
             var batchList = batch;
@@ -157,6 +189,11 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
                     .ToDictionary(x => x.Id.ToString(), x => x.Value.Segment);
 
                 var batchResult = await batchProcessingService.ProcessBatchAsync(idSegments, batchOptions, false);
+                // Capture user prompt and raw response for the first batch
+                if (firstBatchUserPrompt == null && batchResult.UserPrompt != null)
+                    firstBatchUserPrompt = batchResult.UserPrompt;
+                if (firstBatchRawResponse == null && batchResult.RawResponse != null)
+                    firstBatchRawResponse = batchResult.RawResponse;
 
                 var duplicates = batchResult.UpdatedTranslations.GroupBy(x => x.TranslationId)
                     .Where(g => g.Count() > 1)
@@ -310,11 +347,11 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             return allResults;
         }
 
-        // Step 9: Extract initial segments eligible for translation and compute counters.
+        //  Extract initial segments eligible for translation and compute counters.
         var units = content.GetUnits().ToList();
         result.TotalSegmentsCount = units.SelectMany(x => x.Segments).Count();
 
-        // Step 10: Flatten unit-segment pairs so updates can be re-applied to original units.
+        //  Flatten unit-segment pairs so updates can be re-applied to original units.
         var segmentsToTranslate = units
             .SelectMany(unit => unit.Segments.Select(segment => (Unit: unit, Segment: segment)))
             .Where(x => ShouldProcessSegmentForTranslateContent(x.Segment, processDraftSegments))
@@ -322,20 +359,20 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
 
         result.TotalTranslatable = segmentsToTranslate.Count;
 
-        // Step 11: Build translation buckets using token budget instead of segment count.
+        //  Build translation buckets using token budget instead of segment count.
         var translationBatches = await BuildTokenBucketsAsync(
             segmentsToTranslate,
             x => x.Segment.GetSource(),
             tokenBudgetPerBucket);
 
-        // Step 12: Limit concurrent batch execution with a semaphore.
+        //  Limit concurrent batch execution with a semaphore.
         using var semaphore = new SemaphoreSlim(maxParallelBatches, maxParallelBatches);
 
         var batchTasks = translationBatches
             .Select((batch, index) => ProcessBatch(batch, index + 1))
             .ToList();
 
-        // Step 13: Execute all batches, then regroup translated segments by their parent unit.
+        //  Execute all batches, then regroup translated segments by their parent unit.
         // Await via a stored Task so we can inspect all inner exceptions if multiple batches fail.
         var whenAllTask = Task.WhenAll(batchTasks);
         List<(Unit Unit, Segment Segment, TranslationEntity Translation)> processedSegments;
@@ -370,8 +407,11 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
         result.Usage = UsageDto.Sum(usages);
         result.SystemPrompt = systemPrompt;
         result.DroppedBucketsMessage = BuildDroppedBucketsMessage(droppedBucketWarnings, untranslatedSegmentsInDroppedBuckets);
+        // Expose user prompt and raw response for UI (first batch only)
+        result.UserPrompt = firstBatchUserPrompt;
+        result.RawResponse = firstBatchRawResponse;
 
-        // Step 14: Wrap per-batch execution with semaphore acquire/release.
+        //  Wrap per-batch execution with semaphore acquire/release.
         async Task<List<(Unit Unit, Segment Segment, TranslationEntity Translation)>> ProcessBatch(
             List<(Unit Unit, Segment Segment)> batch,
             int batchNumber)
@@ -388,7 +428,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             }
         }
 
-        // Step 15: Apply translated text back to segments and collect usage provenance.
+        //  Apply translated text back to segments and collect usage provenance.
         var updatedCount = 0;
         foreach (var (unit, results) in processedBatches)
         {
@@ -415,7 +455,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
 
         result.TargetsUpdatedCount = updatedCount;
 
-        // Step 16: Serialize and upload output in the requested format.
+        //  Serialize and upload output in the requested format.
         if (input.OutputFileHandling == "original")
         {
             var targetContent = content.Target();
@@ -431,7 +471,7 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
             result.File = await fileManagementClient.UploadAsync(content.Serialize().ToStream(), MediaTypes.Xliff, content.XliffFileName);
         }
 
-        // Step 17: Return aggregated processing metadata and output file reference.
+        //  Return aggregated processing metadata and output file reference.
         result.ErrorMessages = errors.Count > 0 ? string.Join(Environment.NewLine, errors) : null;
         return result;
     }    
@@ -483,6 +523,34 @@ public class TranslationActions(InvocationContext invocationContext, IFileManage
 
         return $"status=warning; dropped_buckets={droppedBucketWarnings.Count}; " +
                $"unchanged_segments={untranslatedSegmentsInDroppedBuckets}; details={detailsText}";
+    }
+
+    // XLIFF fuzzy match parser
+    public static Dictionary<string, FuzzyMatchContext> ParseXliffForFuzzyMatches(string xliffContent)
+    {
+        var result = new Dictionary<string, FuzzyMatchContext>();
+        var doc = XDocument.Parse(xliffContent);
+        var nsM = doc.Root?.GetNamespaceOfPrefix("m") ?? XNamespace.None;
+        var transUnits = doc.Descendants("trans-unit");
+        foreach (var unit in transUnits)
+        {
+            var segmentId = unit.Attribute("id")?.Value;
+            var grossScoreAttr = unit.Attribute(nsM + "gross-score")?.Value;
+            var sourceText = unit.Element("source")?.Value;
+            double score = 0;
+            if (segmentId != null && grossScoreAttr != null && double.TryParse(grossScoreAttr, out score))
+            {
+                if (score > 75)
+                {
+                    result[segmentId] = new FuzzyMatchContext
+                    {
+                        MatchedText = sourceText,
+                        Similarity = score
+                    };
+                }
+            }
+        }
+        return result;
     }
 
     [Action("Translate in background", Description = "Starts background translation for a file and outputs a batch ID to download results later.")]
